@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AudioPWA - Éditeur Audio</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#3b82f6">
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text: #f8fafc;
+        }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background: var(--card-bg);
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        h1 { margin-top: 0; font-size: 1.5rem; text-align: center; }
+        .control-group {
+            margin: 15px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        canvas {
+            width: 100%;
+            height: 150px;
+            background: #000;
+            border-radius: 6px;
+            margin: 15px 0;
+        }
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.9; }
+        button:disabled { background: #475569; cursor: not-allowed; }
+        .row { display: flex; gap: 10px; }
+        input[type="file"] { display: none; }
+        .file-upload-btn {
+            display: inline-block;
+            background: #475569;
+            color: white;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>🎵 AudioPWA Studio</h1>
+        
+        <div class="control-group">
+            <label class="file-upload-btn">
+                📂 Ouvrir un fichier audio
+                <input type="file" id="audioFile" accept="audio/*">
+            </label>
+        </div>
+
+        <canvas id="waveform"></canvas>
+
+        <div class="row">
+            <button id="playBtn" disabled>▶ Lecture</button>
+            <button id="stopBtn" disabled>⏹ Stop</button>
+        </div>
+
+        <hr style="border-color: #334155; margin: 20px 0;">
+
+        <h3>✂ Édition & Effets</h3>
+        <div class="row">
+            <div class="control-group" style="flex:1;">
+                <label>Début (s): <input type="number" id="startTime" value="0" step="0.1" style="padding:6px; background:#0f172a; color:#fff; border:1px solid #475569; border-radius:4px;"></label>
+            </div>
+            <div class="control-group" style="flex:1;">
+                <label>Fin (s): <input type="number" id="endTime" value="0" step="0.1" style="padding:6px; background:#0f172a; color:#fff; border:1px solid #475569; border-radius:4px;"></label>
+            </div>
+        </div>
+
+        <div class="row">
+            <button id="cutBtn" disabled>✂ Découper</button>
+            <button id="fadeBtn" disabled>📉 Appliquer Fondus (Fade)</button>
+        </div>
+
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="limiterToggle"> Activer le Limiteur Brickwall (-0.1 dB)
+            </label>
+        </div>
+
+        <div class="control-group" style="margin-top: 20px;">
+            <button id="exportBtn" disabled style="background: #10b981;">💾 Exporter en WAV</button>
+        </div>
+    </div>
+
+    <script>
+        let audioCtx = null;
+        let audioBuffer = null;
+        let sourceNode = null;
+        let isPlaying = false;
+
+        const fileInput = document.getElementById('audioFile');
+        const playBtn = document.getElementById('playBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const cutBtn = document.getElementById('cutBtn');
+        const fadeBtn = document.getElementById('fadeBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const startTimeInput = document.getElementById('startTime');
+        const endTimeInput = document.getElementById('endTime');
+        const limiterToggle = document.getElementById('limiterToggle');
+        const canvas = document.getElementById('waveform');
+        const canvasCtx = canvas.getContext('2d');
+
+        // Enregistrement du Service Worker pour la PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js');
+        }
+
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            const arrayBuffer = await file.arrayBuffer();
+            audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            startTimeInput.value = 0;
+            endTimeInput.value = audioBuffer.duration.toFixed(2);
+            endTimeInput.max = audioBuffer.duration;
+
+            drawWaveform();
+            enableControls(true);
+        });
+
+        function drawWaveform() {
+            if (!audioBuffer) return;
+            const data = audioBuffer.getChannelData(0);
+            canvas.width = canvas.clientWidth;
+            canvas.height = canvas.clientHeight;
+            
+            canvasCtx.fillStyle = '#000';
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            canvasCtx.lineWidth = 2;
+            canvasCtx.strokeStyle = '#3b82f6';
+            canvasCtx.beginPath();
+
+            const step = Math.ceil(data.length / canvas.width);
+            const amp = canvas.height / 2;
+
+            for (let i = 0; i < canvas.width; i++) {
+                let min = 1.0;
+                let max = -1.0;
+                for (let j = 0; j < step; j++) {
+                    const datum = data[(i * step) + j];
+                    if (datum < min) min = datum;
+                    if (datum > max) max = datum;
+                }
+                canvasCtx.moveTo(i, (1 + min) * amp);
+                canvasCtx.lineTo(i, (1 + max) * amp);
+            }
+            canvasCtx.stroke();
+        }
+
+        function enableControls(enable) {
+            playBtn.disabled = !enable;
+            stopBtn.disabled = !enable;
+            cutBtn.disabled = !enable;
+            fadeBtn.disabled = !enable;
+            exportBtn.disabled = !enable;
+        }
+
+        // Gestion de la lecture avec Limiteur Brickwall optionnel
+        playBtn.addEventListener('click', () => {
+            if (!audioBuffer || isPlaying) return;
+
+            sourceNode = audioCtx.createBufferSource();
+            sourceNode.buffer = audioBuffer;
+
+            let lastNode = sourceNode;
+
+            // Limiteur Brickwall simulé via DynamicsCompressor ultra-rapide
+            if (limiterToggle.checked) {
+                const limiter = audioCtx.createDynamicsCompressor();
+                limiter.threshold.setValueAtTime(-0.1, audioCtx.currentTime);
+                limiter.knee.setValueAtTime(0, audioCtx.currentTime); // Seuil "brickwall" dur
+                limiter.ratio.setValueAtTime(20, audioCtx.currentTime);
+                limiter.attack.setValueAtTime(0.001, audioCtx.currentTime);
+                limiter.release.setValueAtTime(0.05, audioCtx.currentTime);
+                
+                sourceNode.connect(limiter);
+                lastNode = limiter;
+            }
+
+            lastNode.connect(audioCtx.destination);
+            
+            const start = parseFloat(startTimeInput.value);
+            sourceNode.start(0, start);
+            isPlaying = true;
+
+            sourceNode.onended = () => { isPlaying = false; };
+        });
+
+        stopBtn.addEventListener('click', () => {
+            if (sourceNode && isPlaying) {
+                sourceNode.stop();
+                isPlaying = false;
+            }
+        });
+
+        // Découpe (Cut)
+        cutBtn.addEventListener('click', () => {
+            const start = parseFloat(startTimeInput.value);
+            const end = parseFloat(endTimeInput.value);
+            if (start >= end) return alert("Plage invalide");
+
+            const sampleRate = audioBuffer.sampleRate;
+            const startFrame = Math.floor(start * sampleRate);
+            const endFrame = Math.floor(end * sampleRate);
+            const frameCount = endFrame - startFrame;
+
+            const newBuffer = audioCtx.createBuffer(audioBuffer.numberOfChannels, frameCount, sampleRate);
+            for (let i = 0; i < audioBuffer.numberOfChannels; i++) {
+                const channelData = audioBuffer.getChannelData(i);
+                newBuffer.copyToChannel(channelData.subarray(startFrame, endFrame), i);
+            }
+
+            audioBuffer = newBuffer;
+            startTimeInput.value = 0;
+            endTimeInput.value = audioBuffer.duration.toFixed(2);
+            drawWaveform();
+            alert("Audio découpé avec succès !");
+        });
+
+        // Application de fondus (Fade In / Fade Out)
+        fadeBtn.addEventListener('click', () => {
+            const fadeTime = 0.5; // 0.5 seconde de fondu
+            const sampleRate = audioBuffer.sampleRate;
+            const fadeFrames = Math.floor(fadeTime * sampleRate);
+
+            for (let i = 0; i < audioBuffer.numberOfChannels; i++) {
+                const data = audioBuffer.getChannelData(i);
+                // Fade In
+                for (let j = 0; j < fadeFrames; j++) {
+                    data[j] *= (j / fadeFrames);
+                }
+                // Fade Out
+                for (let j = 0; j < fadeFrames; j++) {
+                    const idx = data.length - 1 - j;
+                    data[idx] *= (j / fadeFrames);
+                }
+            }
+            drawWaveform();
+            alert("Fondus appliqués !");
+        });
+
+        // Export en WAV
+        exportBtn.addEventListener('click', () => {
+            const wavData = bufferToWav(audioBuffer);
+            const blob = new Blob([wavData], { type: 'audio/wav' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'audio-edite.wav';
+            a.click();
+        });
+
+        function bufferToWav(buffer) {
+            const numOfChan = buffer.numberOfChannels;
+            const length = buffer.length * numOfChan * 2 + 44;
+            const out = new DataView(new ArrayBuffer(length));
+            let channels = [];
+            let sampleRate = buffer.sampleRate;
+            let offset = 0;
+            let pos = 0;
+
+            function writeString(str) {
+                for (let i = 0; i < str.length; i++) {
+                    out.setUint8(pos++, str.charCodeAt(i));
+                }
+            }
+
+            writeString('RIFF');
+            out.setUint32(pos, length - 8, true); pos += 4;
+            writeString('WAVE');
+            writeString('fmt ');
+            out.setUint32(pos, 16, true); pos += 4;
+            out.setUint16(pos, 1, true); pos += 2;
+            out.setUint16(pos, numOfChan, true); pos += 2;
+            out.setUint32(pos, sampleRate, true); pos += 4;
+            out.setUint32(pos, sampleRate * 2 * numOfChan, true); pos += 4;
+            out.setUint16(pos, numOfChan * 2, true); pos += 2;
+            out.setUint16(pos, 16, true); pos += 2;
+            writeString('data');
+            out.setUint32(pos, length - pos - 4, true); pos += 4;
+
+            for (let i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i));
+
+            while (pos < length) {
+                for (let i = 0; i < numOfChan; i++) {
+                    let sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                    sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+                    out.setInt16(pos, sample, true);
+                    pos += 2;
+                }
+                offset++;
+            }
+            return out.buffer;
+        }
+    </script>
+</body>
+</html>
